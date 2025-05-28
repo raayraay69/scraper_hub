@@ -11,6 +11,59 @@ export class NoblesvilleMainstreetEventsScraper extends BaseScraper {
     super('Noblesville Main Street', 'https://www.noblesvillemainstreet.org/events');
   }
 
+  private parseTimeFromText(timeText: string): { startTime?: string, endTime?: string } {
+    let startTime: string | undefined = undefined;
+    let endTime: string | undefined = undefined;
+
+    if (!timeText) {
+      return { startTime, endTime };
+    }
+
+    const timeParts = timeText.split(/\s*<br>\s*|\s*–\s*|\s*-\s*/); // Split by <br>, – or -
+    const timeRegex = /\d{1,2}:\d{2}\s*(?:AM|PM)/i;
+
+    if (timeParts.length > 1) { // e.g. "Date <br> StartTime – EndTime" OR "StartTime - EndTime"
+      // Check if the first part could be a date, if so, times start from index 1
+      const firstPartIsLikelyDate = /[A-Za-z]+\s\d{1,2},\s\d{4}/.test(timeParts[0]) || /\d{4}-\d{2}-\d{2}/.test(timeParts[0]);
+      let timeStartIndex = firstPartIsLikelyDate ? 1 : 0;
+
+      if (timeParts[timeStartIndex]) {
+        const potentialStartTime = timeParts[timeStartIndex].match(timeRegex);
+        if (potentialStartTime) {
+          startTime = potentialStartTime[0];
+        }
+      }
+
+      if (timeParts[timeStartIndex + 1]) { // Potential end time
+        const potentialEndTime = timeParts[timeStartIndex + 1].match(timeRegex);
+        if (potentialEndTime) {
+          endTime = potentialEndTime[0];
+        }
+      } else if (startTime && timeParts[timeStartIndex]) { 
+        // Case: "StartTime – EndTime" where both are in the same part after date
+        // e.g. eventTimeParagraph has "May 24, 2025 <br> 8:00 AM – 12:00 PM" -> timeParts[1] is "8:00 AM – 12:00 PM"
+        // or eventMetaTime has "8:00 AM - 12:00 PM" -> timeParts[0] is "8:00 AM - 12:00 PM"
+        const remainingTextAfterStartTime = timeParts[timeStartIndex].substring(startTime.length);
+        const endMatch = remainingTextAfterStartTime.match(timeRegex);
+        if (endMatch) {
+          endTime = endMatch[0];
+        }
+      }
+    } else if (timeParts.length === 1 && timeParts[0]) { // Only one part, could be "StartTime" or "StartTime - EndTime"
+      const potentialStartTime = timeParts[0].match(timeRegex);
+      if (potentialStartTime) {
+        startTime = potentialStartTime[0];
+        // Check for end time in the same string part
+        const remainingTextAfterStartTime = timeParts[0].substring(startTime.length);
+        const endMatch = remainingTextAfterStartTime.match(timeRegex);
+        if (endMatch) {
+          endTime = endMatch[0];
+        }
+      }
+    }
+    return { startTime, endTime };
+  }
+
   private async parseEventPage(eventUrl: string): Promise<EventListing | null> {
     try {
       const html = await this.fetchHtml(eventUrl);
@@ -32,9 +85,12 @@ export class NoblesvilleMainstreetEventsScraper extends BaseScraper {
 
         if (startDateRaw) {
           const dateObj = new Date(startDateRaw);
+          // Ensure date is valid
           if (!isNaN(dateObj.getTime())) {
             parsedStartDate = `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
             parsedStartTime = `${String(dateObj.getHours()).padStart(2, '0')}:${String(dateObj.getMinutes()).padStart(2, '0')}`;
+          } else {
+            console.warn(`[NoblesvilleMainstreetEventsScraper] Invalid date from JSON-LD startDateRaw: ${startDateRaw} for ${eventUrl}`);
           }
         }
         
@@ -83,63 +139,73 @@ export class NoblesvilleMainstreetEventsScraper extends BaseScraper {
 
       const eventDateEl = document.querySelector('time.event-date');
       if (eventDateEl) {
-          startDate = eventDateEl.getAttribute('datetime') || ''; // YYYY-MM-DD
+          const datetimeAttr = eventDateEl.getAttribute('datetime')?.trim();
+          if (datetimeAttr) {
+            // Validate YYYY-MM-DD format
+            if (/^\d{4}-\d{2}-\d{2}$/.test(datetimeAttr)) {
+              startDate = datetimeAttr;
+            } else {
+              console.warn(`[NoblesvilleMainstreetEventsScraper] Invalid date format in datetime attribute: ${datetimeAttr} for ${eventUrl}. Expected YYYY-MM-DD.`);
+            }
+          }
       }
       
       const eventTimeParagraph = document.querySelector('p.event-time')?.textContent?.trim() || '';
       if (eventTimeParagraph) {
           if (!startDate) { // Try to get date from this paragraph if not found above
               const dateMatch = eventTimeParagraph.match(/[A-Za-z]+\s\d{1,2},\s\d{4}/);
-              if (dateMatch) {
+              if (dateMatch && dateMatch[0]) {
                   const parsed = new Date(dateMatch[0]);
+                  // Ensure date is valid after parsing
                   if(!isNaN(parsed.getTime())) {
                     startDate = `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`;
+                  } else {
+                    console.warn(`[NoblesvilleMainstreetEventsScraper] Could not parse date from eventTimeParagraph: ${dateMatch[0]} for ${eventUrl}`);
                   }
               }
           }
-          const timeParts = eventTimeParagraph.split(/\s*<br>\s*|\s*–\s*|\s*-\s*/); // Split by <br>, – or -
-          const timeRegex = /\d{1,2}:\d{2}\s*(?:AM|PM)/i;
-          if (timeParts.length > 1) {
-            const potentialStartTime = timeParts[1].match(timeRegex);
-            if (potentialStartTime) startTime = potentialStartTime[0];
-            if (timeParts.length > 2) { // e.g. Date <br> StartTime – EndTime
-                const potentialEndTime = timeParts[2].match(timeRegex);
-                if(potentialEndTime) endTime = potentialEndTime[0];
-            } else { // e.g. StartTime – EndTime (if date was separate)
-                const endMatch = timeParts[1].substring(potentialStartTime?.[0].length || 0).match(timeRegex);
-                if(endMatch) endTime = endMatch[0];
-            }
-          } else if (timeParts.length === 1 && timeParts[0].match(timeRegex)) { // Only start time
-             const potentialStartTime = timeParts[0].match(timeRegex);
-             if (potentialStartTime) startTime = potentialStartTime[0];
-          }
+          // Use the new helper method for time parsing
+          const parsedTimes = this.parseTimeFromText(eventTimeParagraph);
+          startTime = parsedTimes.startTime;
+          endTime = parsedTimes.endTime;
+
       } else { // Fallback to individual time elements if p.event-time not found/useful
-          const startTimeEl = document.querySelector('time.event-time-12hr');
-          const endTimeEl = document.querySelectorAll('time.event-time-12hr');
+          // This part remains as specific selectors for time.event-time-12hr might be more reliable
+          // if p.event-time is structured differently or absent.
+          const startTimeEl = document.querySelector('time.event-time-12hr'); // First element is usually start time
           const timeElements = Array.from(document.querySelectorAll('time.event-time-12hr'));
           
           startTime = startTimeEl?.textContent?.trim() || undefined;
-          if (timeElements.length > 1) {
+          if (timeElements.length > 1) { // If there are multiple time elements
             endTime = timeElements[timeElements.length - 1]?.textContent?.trim() || undefined;
           }
-          if (startTime === endTime && timeElements.length === 1) endTime = undefined; // If only one time tag, it's start time
+          // If startTime and endTime are the same from multiple elements, or only one element found, clear endTime.
+          if (startTime === endTime && timeElements.length <= 1) endTime = undefined;
       }
 
 
-      if (!startDate) { // If still no date, try another common Squarespace selector
-          const eventMetaDate = document.querySelector('.eventitem-meta-date')?.textContent?.trim() || '';
-          if (eventMetaDate) {
-              const parsed = new Date(eventMetaDate);
+      if (!startDate) { // If still no date, try another common Squarespace selector like .eventitem-meta-date
+          const eventMetaDateText = document.querySelector('.eventitem-meta-date')?.textContent?.trim() || '';
+          if (eventMetaDateText) {
+              const parsed = new Date(eventMetaDateText);
+              // Ensure date is valid after parsing
               if(!isNaN(parsed.getTime())) {
                 startDate = `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`;
+              } else {
+                console.warn(`[NoblesvilleMainstreetEventsScraper] Could not parse date from eventMetaDate: ${eventMetaDateText} for ${eventUrl}`);
               }
           }
       }
-       if (!startTime) { // If still no start time
-            const eventMetaTime = document.querySelector('.eventitem-meta-time')?.textContent?.trim() || '';
-            const times = eventMetaTime.split(/\s*-\s*/);
-            startTime = times[0]?.trim() || undefined;
-            endTime = times[1]?.trim() || undefined;
+
+       // If startTime is still undefined, try to parse from .eventitem-meta-time
+       if (startTime === undefined) { // Check specifically for undefined, as empty string could be a valid parsed (but empty) time
+            const eventMetaTimeFullText = document.querySelector('.eventitem-meta-time')?.textContent?.trim() || '';
+            if (eventMetaTimeFullText) {
+                 // Use the new helper method for time parsing from .eventitem-meta-time
+                const parsedTimesFromMeta = this.parseTimeFromText(eventMetaTimeFullText);
+                startTime = parsedTimesFromMeta.startTime;
+                endTime = parsedTimesFromMeta.endTime;
+            }
         }
 
 
