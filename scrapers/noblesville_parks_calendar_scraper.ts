@@ -2,12 +2,14 @@ import { BaseScraper } from './base_scraper';
 import { EventListing } from '@app-types';
 import { parseHTML } from 'linkedom';
 
+import { ScraperConfigOptions } from './config_types';
+
 // Markdown specific helpers (parseDateString, parseTimeRange) are removed.
 
 export class NoblesvilleParksCalendarScraper extends BaseScraper {
-  constructor() {
+  constructor(config?: ScraperConfigOptions) { // config is now optional
     // Target the main calendar page
-    super('Noblesville Parks', 'https://www.noblesvilleparks.org/calendar.aspx');
+    super('Noblesville Parks', 'https://www.noblesvilleparks.org/calendar.aspx', config);
   }
 
   private parseEventDateTime(dateTimeString: string): { date: string, time?: string, fullIso?: string } {
@@ -203,7 +205,7 @@ export class NoblesvilleParksCalendarScraper extends BaseScraper {
   }
 
 
-  public async scrape(_maxPages?: number, env?: any): Promise<EventListing[]> {
+  public async scrape(env?: any): Promise<EventListing[]> { // Removed maxEventsPerSource
     const allEvents: EventListing[] = [];
     let htmlContentMainPage: string;
 
@@ -228,32 +230,52 @@ export class NoblesvilleParksCalendarScraper extends BaseScraper {
     // The text "Community Calendar" appears as a header. We want events listed under it.
     
     // Find the "Community Calendar" header and process its siblings or parent's children
-    const communityCalendarHeader = mainDoc.querySelector('a[name="communityList"]')?.nextElementSibling;
     let eventElements: HTMLElement[] = [];
-    
-    if (communityCalendarHeader) {
-      eventElements = Array.from(communityCalendarHeader.querySelectorAll('div.item, li.item'));
-    }
-    
-    if(eventElements.length === 0) { // Fallback if specific anchor/structure isn't found
-        // Look for list items that contain a "More Details" link.
-        // This is less precise but might catch events if the structure is flat.
-        // This selector targets links that have "More Details" text and an EID in href
-        mainDoc.querySelectorAll('a[href*="EID="]').forEach((el: Element) => {
-            const link = el as HTMLAnchorElement;
-            if (link.textContent?.trim().toLowerCase() === 'more details') {
-                 const href = link.getAttribute('href');
-                 if (href && !href.startsWith('http') && !href.includes('secure.rec1.com')) {
-                    eventLinks.push(href);
-                 }
+    const headerSelectors = ['h2', 'h3', 'h4', 'div.sectionHeader', 'div.header']; // Add more as needed
+    let foundHeader: Element | null = null;
+
+    for (const selector of headerSelectors) {
+        mainDoc.querySelectorAll(selector).forEach((headerEl: Element) => {
+            if (headerEl.textContent?.toLowerCase().includes('community calendar')) {
+                foundHeader = headerEl;
+                return; // Exit forEach early
             }
         });
-    } else {
+        if (foundHeader) break; // Exit loop if header found
+    }
+
+    if (foundHeader) {
+        console.log(`[NoblesvilleParksCalendarScraper] Found header: ${foundHeader.textContent?.trim()}`);
+        // Try to find list container as next sibling or sibling of parent
+        let listContainer: Element | null = foundHeader.nextElementSibling;
+        while(listContainer && !listContainer.matches('ul, div.list-container, div.widget, div.eventsList')) { // Common list containers
+            listContainer = listContainer.nextElementSibling;
+        }
+        
+        if (!listContainer && foundHeader.parentElement) { // Check parent's siblings if direct sibling not found
+            listContainer = foundHeader.parentElement.nextElementSibling;
+             while(listContainer && !listContainer.matches('ul, div.list-container, div.widget, div.eventsList')) {
+                listContainer = listContainer.nextElementSibling;
+            }
+        }
+        // If no specific container, search within the header's parent, assuming it's a section
+        if (!listContainer && foundHeader.parentElement) {
+            listContainer = foundHeader.parentElement;
+        }
+
+
+        if (listContainer) {
+            console.log(`[NoblesvilleParksCalendarScraper] Found list container for Community Calendar.`);
+            eventElements = Array.from(listContainer.querySelectorAll('div.item, li.item, div.eventItem')); // Added div.eventItem
+        }
+    }
+    
+    // Extract links from identified eventElements
+    if (eventElements.length > 0) {
         eventElements.forEach((item: HTMLElement) => {
             const linkElement = item.querySelector('a[href*="EID="]') as HTMLAnchorElement;
             if (linkElement) {
               const href = linkElement.getAttribute('href');
-              // Ensure it's a local link and not a CivicRec link
               if (href && !href.startsWith('http') && !href.includes('secure.rec1.com')) {
                 eventLinks.push(href);
               }
@@ -261,16 +283,36 @@ export class NoblesvilleParksCalendarScraper extends BaseScraper {
         });
     }
 
+    // Fallback if no events found through structured search OR if initial header search failed
+    if (eventLinks.length === 0) {
+        console.log(`[NoblesvilleParksCalendarScraper] Community Calendar section not found or no events in it, using fallback 'More Details' link search.`);
+        mainDoc.querySelectorAll('a[href*="EID="]').forEach((el: Element) => {
+            const link = el as HTMLAnchorElement;
+            // Check text content for "More Details" or if it's a title-like link within a common event list item
+            const linkText = link.textContent?.trim().toLowerCase();
+            const parentItem = link.closest('li, div.item, div.event'); // Check if link is part of a list item structure
+
+            if (linkText === 'more details' || (parentItem && link.matches('.title, .event_title, .eventName'))) {
+                 const href = link.getAttribute('href');
+                 if (href && !href.startsWith('http') && !href.includes('secure.rec1.com')) {
+                    eventLinks.push(href);
+                 }
+            }
+        });
+    }
 
     console.log(`[NoblesvilleParksCalendarScraper] Found ${eventLinks.length} potential Community Calendar event links.`);
     const uniqueEventLinks = [...new Set(eventLinks)];
 
-    // Limit processing for now
-    const linksToProcess = uniqueEventLinks.slice(0, 10); 
+    // Use this.config.maxItemsPerScraper to limit linksToProcess
+    const limit = this.config.maxItemsPerScraper ?? BaseScraper.DEFAULT_CONFIG.maxItemsPerScraper;
+    const linksToProcess = uniqueEventLinks.slice(0, limit); 
+    console.log(`[NoblesvilleParksCalendarScraper] Processing ${linksToProcess.length} event links (limit: ${limit}).`);
 
     for (const relativeUrl of linksToProcess) {
       try {
-        const fullEventUrl = new URL(relativeUrl, "https://www.noblesvilleparks.org").toString();
+        // this.baseUrl is already correctly set by BaseScraper constructor using config
+        const fullEventUrl = new URL(relativeUrl, this.baseUrl).toString();
         const event = await this.parseEventPage(fullEventUrl);
         if (event) {
           allEvents.push(event);

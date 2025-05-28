@@ -15,32 +15,77 @@ import { VisitHamiltonCountyEventsScraper } from './visit_hamilton_county_events
 import { EventbriteIndianaEventsScraper } from './eventbrite_indiana_events_scraper'; // Added import
 import { JobListing, EventListing } from '@app-types'; // Consolidated imports
 import { BaseScraper } from './base_scraper';
+import { JobListingSchema, EventListingSchema } from './schemas'; // Zod schemas
+import { ScraperConfigOptions } from './config_types';
 
 export class ScraperManager {
   private jobScrapers: BaseScraper[];
   private eventScrapers: BaseScraper[];
 
-  constructor() {
+  constructor(env?: any) { // Allow env to be passed for potential config from there
+
+    // Default global configuration for all scrapers
+    const globalScraperConfig: ScraperConfigOptions = {
+      rateLimitMinMs: env?.RATE_LIMIT_MIN_MS || 1200,
+      rateLimitRandomMs: env?.RATE_LIMIT_RANDOM_MS || 600,
+      maxItemsPerScraper: env?.MAX_ITEMS_PER_SCRAPER || 15,
+    };
+
+    // Specific configurations for each scraper
+    const lillyConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://careers.lilly.com/api/jobs' };
+    const anthemConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://careers.antheminc.com/api/jobs' }; // Assuming similar API structure
+    const rocheConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://careers.roche.com/global/en/search-results' }; // Example, actual URL will vary
+    const cortevaConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://careers.corteva.com/api/jobs' };
+    const communityHealthConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://jobs.chs.net/api/jobs' };
+    const cumminsConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://cummins.jobs/api/jobs' };
+    const iuHealthConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://careers.iuhealth.org/api/jobs' }; // Example
+    const rollsRoyceConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://careers.rolls-royce.com/api/jobs' };
+    const angiConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://www.angi.com/careers/jobs' }; // Example, check actual job board
+    const finishLineConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://careers.finishline.com/api/jobs' };
+    
+    const noblesvilleGovConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://www.noblesville.in.us/calendar.aspx' };
+    const noblesvilleMainstreetConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://www.noblesvillemainstreet.org/events' };
+    const noblesvilleParksConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://www.noblesvilleparks.org/calendar.aspx', maxItemsPerScraper: 10 };
+    const visitHamiltonCountyConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://www.visithamiltoncounty.com/events/' };
+    const eventbriteIndianaConfig: ScraperConfigOptions = { ...globalScraperConfig, baseUrl: 'https://www.eventbrite.com/d/united-states--indiana/all-events/', maxItemsPerScraper: 50 };
+
+
     this.jobScrapers = [
-      new LillyScraper(),
-      new AnthemScraper(),
-      new RocheScraper(),
-      new CortevaScraper(),
-      new CommunityHealthScraper(),
-      new CumminsScraper(),
-      new IUHealthScraper(),
-      new RollsRoyceScraper(),
-      new AngiScraper(),
-      new FinishLineScraper()
+      new LillyScraper(lillyConfig),
+      new AnthemScraper(anthemConfig),
+      new RocheScraper(rocheConfig),
+      new CortevaScraper(cortevaConfig),
+      new CommunityHealthScraper(communityHealthConfig),
+      new CumminsScraper(cumminsConfig),
+      new IUHealthScraper(iuHealthConfig),
+      new RollsRoyceScraper(rollsRoyceConfig),
+      new AngiScraper(angiConfig),
+      new FinishLineScraper(finishLineConfig)
     ];
 
     this.eventScrapers = [
-      new NoblesvilleGovEventsScraper(),
-      new NoblesvilleMainstreetEventsScraper(),
-      new NoblesvilleParksCalendarScraper(),
-      new VisitHamiltonCountyEventsScraper(),
-      new EventbriteIndianaEventsScraper() // Added new scraper instance
+      new NoblesvilleGovEventsScraper(noblesvilleGovConfig),
+      new NoblesvilleMainstreetEventsScraper(noblesvilleMainstreetConfig),
+      new NoblesvilleParksCalendarScraper(noblesvilleParksConfig),
+      new VisitHamiltonCountyEventsScraper(visitHamiltonCountyConfig),
+      new EventbriteIndianaEventsScraper(eventbriteIndianaConfig)
     ];
+  }
+
+  private isValidJobListing(item: any): item is JobListing {
+    return item &&
+           typeof item.title === 'string' && item.title.trim() !== '' &&
+           typeof item.company === 'string' && item.company.trim() !== '' &&
+           typeof item.url === 'string' && item.url.trim() !== '' &&
+           typeof item.location === 'string' && 
+           typeof item.description === 'string'; 
+  }
+
+  private isValidEventListing(item: any): item is EventListing {
+    return item &&
+           typeof item.title === 'string' && item.title.trim() !== '' &&
+           typeof item.start_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.start_date) &&
+           typeof item.url === 'string' && item.url.trim() !== '';
   }
 
   /**
@@ -62,14 +107,24 @@ export class ScraperManager {
         const duration = Date.now() - startTime;
 
         // Since this is from this.jobScrapers, we expect JobListing[]
-        const jobs = results.filter((job): job is JobListing => 'company' in job);
+        const initialJobs = results.filter((job: any): job is JobListing => this.isValidJobListing(job));
+        console.log(`Scraper ${scraperName} completed initial filter in ${duration}ms. Found ${initialJobs.length} potential jobs.`);
 
-        console.log(`Scraper ${scraperName} completed in ${duration}ms. Found ${jobs.length} jobs.`);
-        allJobs.push(...jobs);
+        const validatedJobs: JobListing[] = [];
+        for (const job of initialJobs) {
+          const parseResult = JobListingSchema.safeParse(job);
+          if (parseResult.success) {
+            validatedJobs.push(parseResult.data as JobListing);
+          } else {
+            console.warn(`[ScraperManager] Job validation failed for "${job.title}" from ${job.company}:`, parseResult.error.flatten().fieldErrors);
+          }
+        }
+        console.log(`[ScraperManager] ${validatedJobs.length} jobs passed Zod validation for ${scraperName}.`);
+        allJobs.push(...validatedJobs);
 
         // Record the success of the scraper run
         if (env?.DB && runId) {
-          await this.recordScraperRunSuccess(runId, jobs.length, env);
+          await this.recordScraperRunSuccess(runId, validatedJobs.length, env);
         }
       } catch (error) {
         console.error(`Error running scraper for ${scraper.constructor.name}:`, error);
@@ -109,16 +164,26 @@ export class ScraperManager {
       const duration = Date.now() - startTime;
       
       // Since this is from this.jobScrapers, we expect JobListing[]
-      const jobs = results.filter((job): job is JobListing => 'company' in job);
-
-      console.log(`Scraper ${actualScraperName} completed in ${duration}ms. Found ${jobs.length} jobs.`);
+      const initialJobs = results.filter((job: any): job is JobListing => this.isValidJobListing(job));
+      console.log(`Scraper ${actualScraperName} completed initial filter in ${duration}ms. Found ${initialJobs.length} potential jobs.`);
+      
+      const validatedJobs: JobListing[] = [];
+      for (const job of initialJobs) {
+        const parseResult = JobListingSchema.safeParse(job);
+        if (parseResult.success) {
+          validatedJobs.push(parseResult.data as JobListing);
+        } else {
+          console.warn(`[ScraperManager] Job validation failed for "${job.title}" from ${job.company}:`, parseResult.error.flatten().fieldErrors);
+        }
+      }
+      console.log(`[ScraperManager] ${validatedJobs.length} jobs passed Zod validation for ${actualScraperName}.`);
 
       // Record the success of the scraper run
       if (env?.DB && runId) {
-        await this.recordScraperRunSuccess(runId, jobs.length, env);
+        await this.recordScraperRunSuccess(runId, validatedJobs.length, env);
       }
 
-      return jobs;
+      return validatedJobs;
     } catch (error) {
       console.error(`Error running job scraper for ${scraper.constructor.name}:`, error);
 
@@ -153,15 +218,24 @@ export class ScraperManager {
         const duration = Date.now() - startTime;
 
         // Since this is from this.eventScrapers, we expect EventListing[]
-        const events = results.filter((event): event is EventListing => 'start_date' in event);
+        const initialEvents = results.filter((event: any): event is EventListing => this.isValidEventListing(event));
+        console.log(`Event scraper ${scraperName} completed initial filter in ${duration}ms. Found ${initialEvents.length} potential events.`);
 
-
-        console.log(`Event scraper ${scraperName} completed in ${duration}ms. Found ${events.length} events.`);
-        allEvents.push(...events);
+        const validatedEvents: EventListing[] = [];
+        for (const event of initialEvents) {
+          const parseResult = EventListingSchema.safeParse(event);
+          if (parseResult.success) {
+            validatedEvents.push(parseResult.data as EventListing);
+          } else {
+            console.warn(`[ScraperManager] Event validation failed for "${event.title}":`, parseResult.error.flatten().fieldErrors);
+          }
+        }
+        console.log(`[ScraperManager] ${validatedEvents.length} events passed Zod validation for ${scraperName}.`);
+        allEvents.push(...validatedEvents);
 
         // Record the success of the scraper run
         if (env?.DB && runId) {
-          await this.recordScraperRunSuccess(runId, events.length, env);
+          await this.recordScraperRunSuccess(runId, validatedEvents.length, env);
         }
       } catch (error) {
         console.error(`Error running event scraper for ${scraper.constructor.name}:`, error);
@@ -201,16 +275,27 @@ export class ScraperManager {
       const duration = Date.now() - startTime;
 
       // Since this is from this.eventScrapers, we expect EventListing[]
-      const events = results.filter((event): event is EventListing => 'start_date' in event);
+      const initialEvents = results.filter((event: any): event is EventListing => this.isValidEventListing(event));
+      console.log(`Event scraper ${actualScraperName} completed initial filter in ${duration}ms. Found ${initialEvents.length} potential events.`);
 
-      console.log(`Event scraper ${actualScraperName} completed in ${duration}ms. Found ${events.length} events.`);
+      const validatedEvents: EventListing[] = [];
+      for (const event of initialEvents) {
+        const parseResult = EventListingSchema.safeParse(event);
+        if (parseResult.success) {
+          validatedEvents.push(parseResult.data as EventListing);
+        } else {
+          console.warn(`[ScraperManager] Event validation failed for "${event.title}":`, parseResult.error.flatten().fieldErrors);
+        }
+      }
+      console.log(`[ScraperManager] ${validatedEvents.length} events passed Zod validation for ${actualScraperName}.`);
+
 
       // Record the success of the scraper run
       if (env?.DB && runId) {
-        await this.recordScraperRunSuccess(runId, events.length, env);
+        await this.recordScraperRunSuccess(runId, validatedEvents.length, env);
       }
 
-      return events;
+      return validatedEvents;
     } catch (error) {
       console.error(`Error running event scraper for ${scraper.constructor.name}:`, error);
 
@@ -234,8 +319,16 @@ export class ScraperManager {
     console.log(`Storing ${events.length} events in the database...`);
     let addedCount = 0;
     let updatedCount = 0;
+    // @ts-ignore D1PreparedStatement is available in CF Workers
+    const insertStatements: D1PreparedStatement[] = [];
+    // @ts-ignore D1PreparedStatement is available in CF Workers
+    const updateStatements: D1PreparedStatement[] = [];
 
     for (const event of events) {
+      if (!this.isValidEventListing(event)) {
+        console.warn(`Skipping invalid event listing: ${event?.title || 'Untitled Event'}`);
+        continue;
+      }
       try {
         // Check if event already exists by URL+title combination
         const existingEventQuery = `
@@ -257,7 +350,7 @@ export class ScraperManager {
             WHERE id = ?
           `;
 
-          await env.DB.prepare(updateQuery)
+          const updateStmt = env.DB.prepare(updateQuery)
             .bind(
               event.title,
               event.description || '',
@@ -277,9 +370,8 @@ export class ScraperManager {
               event.source || '',
               new Date().toISOString(),
               existingEventResult.results[0].id
-            )
-            .run();
-
+            );
+          updateStatements.push(updateStmt);
           updatedCount++;
         } else {
           // Generate a unique ID for the event
@@ -296,7 +388,7 @@ export class ScraperManager {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `;
 
-          await env.DB.prepare(insertQuery)
+          const insertStmt = env.DB.prepare(insertQuery)
             .bind(
               id,
               event.title,
@@ -318,17 +410,30 @@ export class ScraperManager {
               event.source || '',
               new Date().toISOString(),
               new Date().toISOString()
-            )
-            .run();
-
+            );
+          insertStatements.push(insertStmt);
           addedCount++;
         }
       } catch (error) {
-        console.error(`Error storing event "${event.title}":`, error);
+        console.error(`Error preparing statement for event "${event.title}":`, error);
       }
     }
 
-    console.log(`Successfully stored ${events.length} events (${addedCount} added, ${updatedCount} updated)`);
+    const allEventStatements = [...insertStatements, ...updateStatements];
+    if (allEventStatements.length > 0) {
+      try {
+        await env.DB.batch(allEventStatements);
+        console.log(`Successfully batched ${insertStatements.length} inserts and ${updateStatements.length} updates for events.`);
+      } catch (batchError) {
+        console.error('Error executing batch event database operation:', batchError);
+        // Potentially re-throw or handle so the overall process knows it failed
+        throw batchError;
+      }
+    } else {
+      console.log('No valid event statements to execute.');
+    }
+    
+    console.log(`Processed ${events.length} events (intended: ${addedCount} added, ${updatedCount} updated)`);
     return { added: addedCount, updated: updatedCount };
   }
 
@@ -343,8 +448,16 @@ export class ScraperManager {
     console.log(`Storing ${jobs.length} jobs in the database...`);
     let addedCount = 0;
     let updatedCount = 0;
+    // @ts-ignore D1PreparedStatement is available in CF Workers
+    const insertStatements: D1PreparedStatement[] = [];
+    // @ts-ignore D1PreparedStatement is available in CF Workers
+    const updateStatements: D1PreparedStatement[] = [];
 
     for (const job of jobs) {
+      if (!this.isValidJobListing(job)) {
+        console.warn(`Skipping invalid job listing: ${job?.title || 'Untitled Job'} at ${job?.company || 'Unknown Company'}`);
+        continue;
+      }
       try {
         // Check if job already exists by external_id or URL+company combination
         const existingJobQuery = `
@@ -365,7 +478,7 @@ export class ScraperManager {
             WHERE id = ?
           `;
 
-          await env.DB.prepare(updateQuery)
+          const updateStmt = env.DB.prepare(updateQuery)
             .bind(
               job.title,
               job.description || '',
@@ -379,9 +492,8 @@ export class ScraperManager {
               job.status || 'active',
               new Date().toISOString(),
               existingJobResult.results[0].id
-            )
-            .run();
-
+            );
+          updateStatements.push(updateStmt);
           updatedCount++;
         } else {
           // Insert new job
@@ -394,7 +506,7 @@ export class ScraperManager {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `;
 
-          await env.DB.prepare(insertQuery)
+          const insertStmt = env.DB.prepare(insertQuery)
             .bind(
               job.title,
               job.company,
@@ -411,17 +523,30 @@ export class ScraperManager {
               job.status || 'active',
               new Date().toISOString(),
               new Date().toISOString()
-            )
-            .run();
-
+            );
+          insertStatements.push(insertStmt);
           addedCount++;
         }
       } catch (error) {
-        console.error(`Error storing job "${job.title}":`, error);
+        console.error(`Error preparing statement for job "${job.title}" at "${job.company}":`, error);
       }
     }
 
-    console.log(`Successfully stored ${jobs.length} jobs (${addedCount} added, ${updatedCount} updated)`);
+    const allJobStatements = [...insertStatements, ...updateStatements];
+    if (allJobStatements.length > 0) {
+      try {
+        await env.DB.batch(allJobStatements);
+        console.log(`Successfully batched ${insertStatements.length} inserts and ${updateStatements.length} updates for jobs.`);
+      } catch (batchError) {
+        console.error('Error executing batch job database operation:', batchError);
+        // Potentially re-throw or handle so the overall process knows it failed
+        throw batchError;
+      }
+    } else {
+      console.log('No valid job statements to execute.');
+    }
+
+    console.log(`Processed ${jobs.length} jobs (intended: ${addedCount} added, ${updatedCount} updated)`);
     return { added: addedCount, updated: updatedCount };
   }
 

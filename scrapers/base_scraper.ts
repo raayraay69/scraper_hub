@@ -1,13 +1,41 @@
 import { parseHTML } from 'linkedom'; // Import linkedom
 import { JobListing, EventListing } from '@app-types';
+import { ScraperConfigOptions } from './config_types';
 
 export abstract class BaseScraper {
   protected companyName: string;
   protected baseUrl: string;
+  protected readonly config: ScraperConfigOptions;
+
+  protected static readonly DEFAULT_CONFIG: Required<Omit<ScraperConfigOptions, 'baseUrl'>> & Pick<ScraperConfigOptions, 'baseUrl'> = {
+    maxItemsPerScraper: 20, // Default limit for items
+    rateLimitMinMs: 1000,
+    rateLimitRandomMs: 500,
+    baseUrl: undefined, // Base URL must be provided by derived classes if not in config
+  };
   
-  constructor(companyName: string, baseUrl: string) {
+  constructor(companyName: string, initialBaseUrl: string, scraperConfig?: ScraperConfigOptions) {
     this.companyName = companyName;
-    this.baseUrl = baseUrl;
+    this.config = {
+      ...BaseScraper.DEFAULT_CONFIG,
+      ...scraperConfig,
+      baseUrl: scraperConfig?.baseUrl || initialBaseUrl, // Prioritize config, then initial, then default (which is undefined)
+    };
+    this.baseUrl = this.config.baseUrl!; // Ensure baseUrl is set
+    if (!this.baseUrl) {
+        console.error(`[BaseScraper] Critical: Base URL not configured for ${companyName}.`);
+        // throw new Error(`Base URL not configured for ${companyName}`); // Or handle as appropriate
+    }
+  }
+
+  /**
+   * Introduce a delay to respect rate limits.
+   */
+  protected async rateLimitDelay(): Promise<void> {
+    const totalDelay = (this.config.rateLimitMinMs ?? BaseScraper.DEFAULT_CONFIG.rateLimitMinMs) + 
+                       Math.random() * (this.config.rateLimitRandomMs ?? BaseScraper.DEFAULT_CONFIG.rateLimitRandomMs);
+    // console.log(`[BaseScraper] Applying rate limit delay of ${totalDelay.toFixed(0)}ms...`); // Optional: for debugging
+    await new Promise(resolve => setTimeout(resolve, totalDelay));
   }
 
   /**
@@ -15,6 +43,7 @@ export abstract class BaseScraper {
    */
   protected async fetchHtml(url: string): Promise<string> {
     try {
+      await this.rateLimitDelay(); 
       const response = await fetch(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -107,5 +136,5 @@ export abstract class BaseScraper {
    * Abstract method to be implemented by each scraper
    * Made generic to support both Job and Event listings temporarily
    */
-  public abstract scrape(maxPages?: number, env?: any): Promise<JobListing[] | EventListing[]>;
+  public abstract scrape(env?: any): Promise<JobListing[] | EventListing[]>; // Removed maxPages, should use this.config.maxItemsPerScraper
 }
